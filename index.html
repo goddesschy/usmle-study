@@ -820,7 +820,7 @@ async function callClaude({images=[], text, model='claude-sonnet-4-20250514', ma
     ...images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}})),
     {type:'text', text}
   ];
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
+  const r = await fetch('http://localhost:8765/claude', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({model, max_tokens: maxTokens, messages:[{role:'user',content}]})

@@ -26,7 +26,22 @@ import zipfile
 import io
 import time
 import threading
+import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
+
+# .env 파일에서 API 키 로드
+def load_env():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if os.path.exists(env_path):
+        with open(env_path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    os.environ[k.strip()] = v.strip()
+
+load_env()
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 PORT = 8765
@@ -263,6 +278,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_cors()
         self.end_headers()
 
+    def do_POST(self):
+        self.do_GET()
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -285,9 +303,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._error(404, 'index.html not found')
                 return
 
+            # ── /claude  (Claude API 프록시) ──────────────────────────────
+            elif path == '/claude':
+                if self.command != 'POST':
+                    self._error(405, 'POST required')
+                    return
+                content_len = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_len)
+
+                if not ANTHROPIC_API_KEY:
+                    self._error(500, '.env 파일에 ANTHROPIC_API_KEY가 없습니다')
+                    return
+
+                req = urllib.request.Request(
+                    'https://api.anthropic.com/v1/messages',
+                    data=body,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'x-api-key': ANTHROPIC_API_KEY,
+                        'anthropic-version': '2023-06-01',
+                    },
+                    method='POST'
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        result = resp.read()
+                    self.send_response(200)
+                    self.send_cors()
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(result)))
+                    self.end_headers()
+                    self.wfile.write(result)
+                except urllib.error.HTTPError as e:
+                    err = e.read()
+                    self.send_response(e.code)
+                    self.send_cors()
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                return
+
             # ── /health ──────────────────────────────────────────────────
             elif path == '/health':
-                self._json({'status': 'ok', 'pymupdf': PYMUPDF_OK, 'root': ROOT_DIR})
+                self._json({'status': 'ok', 'pymupdf': PYMUPDF_OK, 'root': ROOT_DIR, 'api_key': bool(ANTHROPIC_API_KEY)})
 
             # ── /subjects ────────────────────────────────────────────────
             elif path == '/subjects':
