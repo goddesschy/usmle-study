@@ -1,0 +1,19 @@
+{
+    // Python 인터프리터 경로
+    "python.defaultInterpreterPath": "python",
+
+    // 터미널에서 실행 시 작업 폴더 자동 설정
+    "terminal.integrated.cwd": "${fileDirname}",
+
+    // 저장 시 자동 포맷 끄기 (서버 코드 건드리지 않도록)
+    "editor.formatOnSave": false,
+
+    // 파일 인코딩 UTF-8 고정
+    "files.encoding": "utf8",
+
+    // config.txt, run.bat 파일 언어 지정
+    "files.associations": {
+        "config.txt": "plaintext",
+        "*.bat": "bat"
+    }
+}

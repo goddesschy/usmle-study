@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "USMLE 서버 실행",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}\\usmle_server.py",
+                "--config",
+                "${workspaceFolder}\\config.txt"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        }
+    ]
+}
