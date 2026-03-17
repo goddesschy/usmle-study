@@ -681,9 +681,10 @@ async function selectSubject(absPath, name) {
 // ── 문제 로드 ────────────────────────────────────────────────────────────────
 async function loadQuestion() {
   if (!state.selectedFile) { alert('왼쪽에서 과목을 먼저 선택하세요'); return; }
-  const itemNum = parseInt(document.getElementById('itemInput').value);
-  if (!itemNum || itemNum < 1) { alert('문제 번호를 입력하세요'); return; }
-
+  const pageNum = parseInt(document.getElementById('pageInput').value);
+  const itemNum = parseInt(document.getElementById('itemInput').value) || 1;
+  // 페이지 번호가 입력돼 있으면 페이지 우선
+  if (pageNum && pageNum > 0) { await loadByPage(); return; }
   await fetchAndDisplay(itemNum);
 }
 
