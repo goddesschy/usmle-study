@@ -232,7 +232,7 @@ def scan_subjects(roots):
                 subjects.append({
                     'name': display_name,
                     'file': fname,
-                    'abs_path': full_path.replace('\\', '/'),
+                    'abs_path': full_path,
                     'group': group,
                     'type': ftype,
                     'size_mb': round(size_mb, 1),
@@ -284,7 +284,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not abs_path:
                     self._error(400, 'file parameter required')
                     return
-                abs_path = os.path.normpath(abs_path)
+                # 슬래시 통일 후 정규화
+                abs_path = os.path.normpath(abs_path.replace('/', os.sep).replace('\\', os.sep))
                 # 허용된 폴더 안에 있는지 확인
                 if not any(abs_path.startswith(os.path.abspath(r)) for r in ROOT_DIRS):
                     self._error(403, 'Access denied')
@@ -311,7 +312,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._error(400, f'Invalid page number: {p_str}')
                     return
 
-                abs_path = os.path.normpath(abs_path)
+                abs_path = os.path.normpath(abs_path.replace('/', os.sep).replace('\\', os.sep))
                 if not any(abs_path.startswith(os.path.abspath(r)) for r in ROOT_DIRS):
                     self._error(403, 'Access denied')
                     return
