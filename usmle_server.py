@@ -269,8 +269,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
 
         try:
+            # ── / 또는 /index.html ───────────────────────────────────────
+            if path in ('/', '/index.html'):
+                index_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index.html')
+                if os.path.exists(index_path):
+                    with open(index_path, 'rb') as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_cors()
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self._error(404, 'index.html not found')
+                return
+
             # ── /health ──────────────────────────────────────────────────
-            if path == '/health':
+            elif path == '/health':
                 self._json({'status': 'ok', 'pymupdf': PYMUPDF_OK, 'root': ROOT_DIR})
 
             # ── /subjects ────────────────────────────────────────────────
