@@ -13,8 +13,9 @@
     ├── config.txt            스캔할 폴더 경로 목록 ({USERNAME} 플레이스홀더)
     ├── flashcards.csv        Noji 가져오기용 암기카드 누적 파일 (자동 생성)
     ├── progress.json         채점 기록 로컬 저장 (자동 생성)
+    ├── cache\                 풀이 결과 캐시: {QID}.json + figures\ (자동 생성, Git 제외)
     ├── .env                  Anthropic API 키 (GitHub 제외)
-    ├── .gitignore            .env / *.csv / progress.json 제외 설정
+    ├── .gitignore            .env / *.csv / progress.json / cache\ 제외 설정
     └── .vscode\
             ├── settings.json
             ├── launch.json
@@ -53,6 +54,9 @@ Claude API 프록시       flashcards.csv 저장    progress.json 집계
 | GET /page?file=PATH&p=N | N번째 페이지 JPEG | ✅ 완료 |
 | POST /claude | Claude API 프록시 (CORS 우회) | ✅ 완료 |
 | GET /crop?file=PATH&p=N&x=X&y=Y&w=W&h=H | 영역 크롭 → JPEG 반환 (+auto=1) | ✅ 완료 |
+| GET/POST /cache?qid=NNNN | 풀이 결과(해설·번역·각주·문답) 저장/불러오기 | 예정 (C-1) |
+| GET /cache/list | 푼 문제 QID 목록 (복습용) | 예정 (C-4) |
+| GET /export?qids=..&format=docx\|pdf | 선택 문제 묶어 docx/pdf 생성·다운로드 | 예정 (E-1/E-2) |
 | POST /flashcard | 암기카드 1장 → flashcards.csv 추가 | 예정 |
 | GET /flashcards.csv | CSV 다운로드 (Noji 가져오기용) | 예정 |
 | GET /stats | 전체 진도·통계 JSON 반환 | 예정 |
@@ -119,6 +123,7 @@ git pull                                              # 병원
 - [x] **B-1 `/crop` 엔드포인트** — 좌표/자동 크롭, usmle_server.py에 통합, 실제 PDF로 검증
 
 ### 📋 예정
+- [ ] **풀이 캐시·복습·내보내기** (C-1~C-4, E-1~E-2) ← 비용 절감, 우선 (Phase 3)
 - [ ] **B-2** Claude 좌표 추출 ← 다음 작업 (색 기반 자동탐지의 MRI·표·형식 한계 해결)
 - [ ] **B-3** 표·Exhibit 팝업 처리
 - [ ] **B-4** 뷰어 해설에 그림 인라인 표시 (현재는 "이미지 있음" 텍스트만 나옴)
@@ -155,7 +160,45 @@ git pull                                              # 병원
 
 ---
 
-### Phase 3 — Noji 암기카드 연동
+### Phase 3 — 풀이 캐시 · 복습 · 내보내기 (C/E 방식) ⭐ 우선
+
+> **목적**: 한 번 푼 문제의 생성 결과(해설·번역·각주·그림)와 Claude 문답을 저장 →
+> 다시 열 때 **API 재호출 없이($0)** 즉시 불러오고 복습. 원하면 docx/pdf로 따로 내보내기.
+> (기존 Phase 6 #14 "응답 캐시"를 아래 두 층 구조로 확장·구체화)
+>
+> **두 층 구조**
+> - **1층 자동 캐시 (프로그램용)**: `cache/{QID}.json`(해설·번역·각주·문답) + `cache/figures/{QID}_n.jpg`(그림). 빠른 복습·재호출.
+> - **2층 내보내기 (사람용)**: 캐시에서 골라 docx/pdf로 저장. 인쇄·오프라인·보관용.
+>
+> `cache/`는 `.gitignore`에 추가(개인 학습 데이터). OneDrive 안에 있어 집·병원 PC 자동 공유.
+
+| 작업 | 완료 기준 |
+|---|---|
+| **C-1** 캐시 스키마 + `/cache` 저장/불러오기 | `GET/POST /cache?qid=NNNN` → 해설·번역·각주 JSON 저장/반환 |
+| **C-2** "캐시 우선" 로딩 | 문제 열 때 캐시 HIT → API 0, MISS → 호출 후 저장 (**비용 절감 핵심**) |
+| **C-3** Claude 문답 저장·복원 | QID별 문답 기록 저장, 재방문 시 채팅 패널에 대화 복원 |
+| **C-4** 그림 캐시 + 복습 목록 | 크롭 그림 저장 + `GET /cache/list`로 푼 문제 목록 표시 (B-2·B-4 후) |
+| **E-1** docx 내보내기 | 문제별·묶음·과목별 선택 → `GET /export?qids=..&format=docx` 다운로드 |
+| **E-2** pdf 내보내기 + 선택 UI | 그림 포함 pdf(한글 폰트 지정) + 뷰어 체크박스/내보내기 버튼 (B-2·B-4 후) |
+
+**캐시 파일 형식**
+```
+cache/
+├── 4117.json          # {qid, 해설_영어, 번역_한글, 각주[], 그림[{파일,설명}], 문답[{질문,답}], 푼날짜}
+├── 4700.json
+└── figures/
+    └── 4117_1.jpg     # 크롭된 그림 (.json에서 파일명으로 참조)
+```
+
+**내보내기 문서 구성**: 문제(영어) → 해설(영어) → 한글 번역 → 각주 → 그림(이미지 삽입). Claude 문답은 포함 옵션.
+
+**순서**: C-1~C-3 + E-1(docx)은 지금 가능(B-2/B-4와 무관). C-4·E-2(그림 포함·pdf)는 B-2·B-4로 그림이 나온 뒤 얹기.
+
+**새 라이브러리**: `pip install python-docx` (docx 생성). pdf는 reportlab 등 + **한글(CJK) 폰트 지정 필수**(안 하면 한글 깨짐).
+
+---
+
+### Phase 4 — Noji 암기카드 연동
 
 > **Noji 공개 API 없음** → CSV 가져오기 방식으로 구현
 > 문제 풀 때마다 버튼 클릭 → Claude가 앞/뒷면 자동 생성 → CSV 누적 → Noji에 주기적 업로드
@@ -182,7 +225,7 @@ git pull                                              # 병원
 
 ---
 
-### Phase 4 — 전체 통계 + 준비도 대시보드
+### Phase 5 — 전체 통계 + 준비도 대시보드
 
 > **점수 추정 한계 (근거 기반)**:
 > UWorld 정답률과 실제 Step 2 CK 점수의 상관관계는 r = 0.55 수준으로 단독 예측은 어렵고,
@@ -211,11 +254,11 @@ git pull                                              # 병원
 
 ---
 
-### Phase 5 — 심화 기능
+### Phase 6 — 심화 기능
 
 | # | 작업 | 완료 기준 |
 |---|---|---|
-| 14 | 응답 캐시 저장 | 번역·해설을 로컬 JSON 캐시, 재호출 시 API 비용 0 |
+| 14 | ~~응답 캐시 저장~~ → **Phase 3로 이동·확장** (C/E 방식) | — |
 | 15 | Google Sheets 인증 + 진도 기록 | 서비스 계정 키 발급 → 채점 시 시트에 자동 1줄 추가 |
 | 16 | 분야 카운트 연결 | `.tsx` 트래커에 실제 완료 문제 수 연동 |
 | 17 | 오답 유사문제 생성 | 오답 1건 → Claude가 비슷한 구조의 새 문제 1개 생성 |
