@@ -15,6 +15,7 @@ USMLE Study Server v2.0
   GET /subjects              -> 과목 목록 (폴더 트리)
   GET /info?file=PATH        -> 파일 정보 (페이지 수, 형식)
   GET /page?file=PATH&p=N   -> N번째 페이지 JPEG 반환
+  GET /crop?file=PATH&p=N&x=&y=&w=&h=  -> 지정 영역 크롭 JPEG (또는 &auto=1 자동 탐지)
   GET /health                -> 서버 상태 확인
 """
 
@@ -32,13 +33,27 @@ from urllib.parse import urlparse, parse_qs, unquote
 # .env 파일에서 API 키 로드
 def load_env():
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-    if os.path.exists(env_path):
-        with open(env_path, encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    os.environ[k.strip()] = v.strip()
+    if not os.path.exists(env_path):
+        print(f'  [.env] 파일 없음: {env_path}')
+        return
+    # utf-8-sig: BOM 자동 제거
+    with open(env_path, encoding='utf-8-sig') as f:
+        raw = f.read()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k = k.strip()
+        v = v.strip()
+        # 앞뒤 따옴표 제거 ("value" 또는 'value')
+        if len(v) >= 2 and v[0] in ('"', "'") and v[-1] == v[0]:
+            v = v[1:-1]
+        os.environ[k] = v
+        # 키 로드 확인 (값은 보안상 일부만 출력)
+        if k == 'ANTHROPIC_API_KEY':
+            masked = v[:8] + '...' + v[-4:] if len(v) > 12 else '****'
+            print(f'  [.env] {k} 로드 완료: {masked}')
 
 load_env()
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -54,6 +69,18 @@ try:
     PYMUPDF_OK = True
 except ImportError:
     PYMUPDF_OK = False
+
+# Pillow + numpy (그림 크롭/탐지용 — /crop 엔드포인트)
+try:
+    from PIL import Image
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
+try:
+    import numpy as np
+    NUMPY_OK = True
+except ImportError:
+    NUMPY_OK = False
 
 # ── 파일 타입 감지 ─────────────────────────────────────────────────────────────
 def detect_file_type(path):
@@ -258,6 +285,42 @@ def scan_subjects(roots):
     return subjects
 
 
+# ── 그림 자동 탐지 (/crop?auto=1) ──────────────────────────────────────────────
+# 텍스트 오검출 방지 가드. 실제 페이지 검증값:
+#   텍스트 ≤0.007 / 회색 MRI 0.022 / 선화·컬러 그림 0.08+  → 0.012면 깔끔히 분리
+FIGURE_MIN_DENSITY = 0.012
+
+def detect_figure(img):
+    """컬러 그림(사진·일러스트·MRI)의 bounding box (x, y, w, h)를 반환. 없으면 None.
+
+    실제 Neurology PDF(QID 4117 등)로 검증: UWorld 파란 UI·흰 여백을 제거하고
+    컬러 그림 본체만 잡는다. 헤더/푸터 경계는 비율로 계산해 해상도와 무관하게 동작.
+    텍스트 페이지는 컬러 밀도 가드로 걸러 None을 반환한다.
+    """
+    arr = np.asarray(img.convert('RGB')).astype('float32')
+    H, W = arr.shape[:2]
+    hdr = int(H * 0.128)   # 상단 파란 헤더 영역 제외 (1372x896 기준 ~115px)
+    ftr = int(H * 0.944)   # 하단 파란 푸터 영역 제외 (~846px)
+    R, G, B = arr[..., 0], arr[..., 1], arr[..., 2]
+    blue_ui = (B > G + 25) & (B > R + 25) & (B > 90)   # UWorld 파란 UI 크롬
+    white = (R > 235) & (G > 235) & (B > 235)          # 흰 배경
+    chan_std = arr.std(axis=2)                          # 컬러 채널 분산(=사진/그림 신호)
+    content = (chan_std > 14) & (~blue_ui) & (~white)
+    content[:hdr] = False
+    content[ftr:] = False
+    ys = np.where(content.sum(axis=1) > 25)[0]
+    xs = np.where(content.sum(axis=0) > 20)[0]
+    if len(ys) < 25 or len(xs) < 25:
+        return None
+    pad = 8
+    y0, y1 = max(hdr, int(ys.min()) - pad), min(ftr, int(ys.max()) + pad)
+    x0, x1 = max(0, int(xs.min()) - pad), min(W, int(xs.max()) + pad)
+    # 가드: bbox 내부 컬러 밀도가 너무 낮으면 그림이 아니라 텍스트 오검출 → None
+    if content[y0:y1, x0:x1].mean() < FIGURE_MIN_DENSITY:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
 # ── HTTP 핸들러 ────────────────────────────────────────────────────────────────
 class Handler(http.server.BaseHTTPRequestHandler):
 
@@ -410,6 +473,79 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(jpg)
 
+            # ── /crop?file=ABS_PATH&p=N&x=&y=&w=&h=  또는 &auto=1 ─────────
+            elif path == '/crop':
+                abs_path = unquote(params.get('file', [''])[0])
+                p_str = params.get('p', ['1'])[0]
+
+                if not abs_path:
+                    self._error(400, 'file parameter required')
+                    return
+
+                try:
+                    page_num = int(p_str)
+                except ValueError:
+                    self._error(400, f'Invalid page number: {p_str}')
+                    return
+
+                abs_path = os.path.normpath(abs_path.replace('/', os.sep).replace('\\', os.sep))
+                if not any(abs_path.startswith(os.path.abspath(r)) for r in ROOT_DIRS):
+                    self._error(403, 'Access denied')
+                    return
+
+                handler = get_file_handler(abs_path)
+                if handler is None:
+                    self._error(404, 'Cannot read file')
+                    return
+
+                if not PIL_OK:
+                    self._error(500, 'Pillow 미설치: pip install pillow')
+                    return
+
+                # /page 와 동일한 픽셀 공간에서 크롭 (좌표 일치 보장)
+                jpg = handler.get_page_jpeg(page_num)
+                img = Image.open(io.BytesIO(jpg)).convert('RGB')
+                W, H = img.size
+
+                if params.get('auto', ['0'])[0] == '1':
+                    if not NUMPY_OK:
+                        self._error(500, 'numpy 미설치: pip install numpy')
+                        return
+                    bbox = detect_figure(img)
+                    if bbox is None:
+                        self._error(404, '그림을 찾지 못했습니다 (auto)')
+                        return
+                    x, y, w, h = bbox
+                else:
+                    try:
+                        x = int(params.get('x', ['0'])[0])
+                        y = int(params.get('y', ['0'])[0])
+                        w = int(params.get('w', [str(W)])[0])
+                        h = int(params.get('h', [str(H)])[0])
+                    except ValueError:
+                        self._error(400, 'x/y/w/h must be integers')
+                        return
+
+                # 경계 보정
+                x = max(0, min(x, W - 1))
+                y = max(0, min(y, H - 1))
+                w = max(1, min(w, W - x))
+                h = max(1, min(h, H - y))
+
+                crop = img.crop((x, y, x + w, y + h))
+                buf = io.BytesIO()
+                crop.save(buf, format='JPEG', quality=90)
+                out = buf.getvalue()
+
+                self.send_response(200)
+                self.send_cors()
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(out)))
+                self.send_header('X-Crop', f'{x},{y},{w},{h}')
+                self.send_header('Cache-Control', 'public, max-age=3600')
+                self.end_headers()
+                self.wfile.write(out)
+
             else:
                 self._error(404, f'Unknown endpoint: {path}')
 
@@ -439,17 +575,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 # ── config.txt 로더 ───────────────────────────────────────────────────────────
+def resolve_path(line):
+    """
+    경로 내 {USERNAME} 또는 ~를 현재 PC의 실제 사용자명으로 치환.
+    예) C:\\Users\\{USERNAME}\\OneDrive - system07\\...
+        → 집 PC:   C:\\Users\\USER\\OneDrive - system07\\...
+        → 병원 PC: C:\\Users\\godde\\OneDrive - system07\\...
+    """
+    username = os.environ.get('USERNAME') or os.environ.get('USER') or ''
+    line = line.replace('{USERNAME}', username)
+    line = line.replace('~', os.path.expanduser('~'))
+    return os.path.normpath(line)
+
 def load_config(config_path):
-    """config.txt 에서 활성화된 경로 목록을 읽어 반환."""
+    """
+    config.txt 에서 활성화된 경로 목록을 읽어 반환.
+    - {USERNAME} 플레이스홀더 → 현재 PC 사용자명 자동 치환
+    - 경로가 실제로 존재하는지 확인 후 로드
+    """
     dirs = []
+    username = os.environ.get('USERNAME') or os.environ.get('USER') or '(unknown)'
+    print(f'  [config] 현재 PC 사용자명: {username}')
+
     try:
-        with open(config_path, encoding='utf-8') as f:
+        with open(config_path, encoding='utf-8-sig') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                dirs.append(line)
-        print(f'  config.txt 로드: {len(dirs)}개 경로 활성화')
+                resolved = resolve_path(line)
+                if os.path.isdir(resolved):
+                    dirs.append(resolved)
+                    print(f'  [config] ✓ {resolved}')
+                else:
+                    print(f'  [config] ✗ 경로 없음 (이 PC에서 스킵): {resolved}')
+        print(f'  [config] {len(dirs)}개 경로 활성화')
     except FileNotFoundError:
         print(f'  WARNING: config.txt 없음: {config_path}')
     except Exception as e:
